@@ -193,7 +193,7 @@
           {}
           (vals params-map)))
 
-(defn- adapt-signature [{:keys [params]}]
+(defn- adapt-signature [{:keys [params return-type return-doc]}]
   (let [params-map    (-> params prepare-params rename-params)
         params        (vec (sort-by :index (vals params-map)))
         [params rest] (if (:rest? (peek params))
@@ -213,20 +213,24 @@
                               (conj (pop arities) (assoc (peek arities) :rest-arg (:name rest)))
                               arities)))
                         [(cond-> req-arity rest (assoc :rest-arg (:name rest)))])]
-    ;; TODO: Add return type information for doc-string and type hints
-    (cond-> {:params  params-map
-             :arities arities}
+    (cond-> {:arities arities
+             :params  (update-vals params-map #(update % :type :str))
+             :return  (cond-> {:type (:str return-type)}
+                        return-doc (assoc :doc return-doc))}
       rest (assoc :variadic rest))))
 
 (defn- add-signature [ctx var-name signature expr]
-  (let [{:keys [_params arities]} (adapt-signature signature)]
-    ;; TODO: Store info from params and return type in var-map
-    ;; Also need to take "this" arg into account, when added by expr-fn
-    ;; Probably need a second pass to construct a doc-string?
-    (reduce (fn [ctx {:keys [args rest-arg]}]
-              (add-arity ctx var-name expr args rest-arg))
-            ctx
-            arities)))
+  (let [{:keys [arities params return]} (adapt-signature signature)]
+    (-> (reduce (fn [ctx {:keys [args rest-arg]}]
+                  (add-arity ctx var-name expr args rest-arg))
+                ctx
+                arities)
+        ;; TODO: For crazy overloads, we will have different return values per signature
+        (update-ns update-in [:vars var-name]
+                   (fn [var-data]
+                     (-> var-data
+                         (update :params merge params)
+                         (update :return merge return)))))))
 
 (defn- add-signatures [ctx var-name signatures expr]
   (reduce (fn [ctx signature]
@@ -234,7 +238,8 @@
           ctx
           signatures))
 
-(defmulti adapt-trait
+(defmulti ^:private adapt-trait
+  {:arglists '([ctx trait node])}
   (fn [_ctx trait _node]
     trait))
 
@@ -351,8 +356,6 @@
 
 ;; TODO: For class/interface members, check if the name is a valid identifier,
 ;; to exclude/handle "indirect" names such as `[Symbol.iterator]`
-;; TODO: Clojurify names, e.g. '?' suffix for booleans, remove `is-` and `get-` prefixes
-;; But then: Handle collisions, e.g. "name" and "getName" (maybe use `-name` for property access?)
 
 (def ^:private setter-args ["value"])
 
@@ -399,6 +402,24 @@
         (add-var var-name (:doc node) (signatures-return-type signatures))
         (add-signatures var-name signatures expr))))
 
+(defn- build-doc-string [{:keys [doc params return] :as var-data}]
+  (let [params-doc (when (seq params)
+                     (str "**Parameters:**\n"
+                          (->> (vals params)
+                               (sort-by (juxt :index :name))
+                               (map (fn [{:keys [name type doc]}]
+                                      (str "- `" name "`: `" type "`" (when doc " - ") doc)))
+                               (str/join "\n"))))
+        return-doc (when-let [{:keys [type doc]} return]
+                     (str "**Returns:** `" type "`" (when doc " - ") doc))
+        doc-string (->> [doc params-doc return-doc]
+                        (remove nil?)
+                        (str/join "\n\n"))]
+    (assoc var-data :doc doc-string)))
+
+(defn- post-process-vars [vars]
+  (update-vals vars build-doc-string))
+
 (defn- rename-vars
   "Renames vars to their preferred name if that is possible without collision."
   [vars]
@@ -432,7 +453,9 @@
                vars)))
 
 (defn- post-process-namespace [ns-data]
-  (update ns-data :vars (comp rename-vars unify-variadic-arities)))
+  (update ns-data :vars (comp post-process-vars
+                              rename-vars
+                              unify-variadic-arities)))
 
 (defn- post-process-namespaces [ctx]
   (update-vals (:namespaces ctx) post-process-namespace))
@@ -442,7 +465,16 @@
        (map names/cljs-name)
        (into ["dots"])))
 
-(defn adapt [module opts]
+(defn adapt
+  "Adapts an extracted TypeScript module to ClojureScript.
+
+   Takes a map returned by `dots.extract/extract`, representing a
+   TypeScript module, and returns a map of ClojureScript namespaces:
+
+   ```
+   namespace => var => properties
+   ```"
+  [module opts]
   (let [{:keys [import-name]} module
         {:keys [namespace]}   opts]
     (-> empty-ctx

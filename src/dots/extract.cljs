@@ -5,9 +5,12 @@
             [dots.typescript :as ts]
             [dots.typescript.import-clause :as import-clause]
             [dots.typescript.import-declaration :as import-declaration]
+            [dots.typescript.js-doc-tag-info :as js-doc-tag-info]
+            [dots.typescript.literal-type :as literal-type]
             [dots.typescript.modifier-flags :as modifier-flags]
             [dots.typescript.namespace-import :as namespace-import]
             [dots.typescript.object-flags :as object-flags]
+            [dots.typescript.object-type :as object-type]
             [dots.typescript.program :as program]
             [dots.typescript.script-kind :as script-kind]
             [dots.typescript.signature :as signature]
@@ -16,12 +19,10 @@
             [dots.typescript.symbol :as symbol]
             [dots.typescript.symbol-flags :as symbol-flags]
             [dots.typescript.type :as type]
-            [dots.typescript.union-or-intersection-type :as union-or-intersection-type]
-            [dots.typescript.literal-type :as literal-type]
             [dots.typescript.type-checker :as type-checker]
             [dots.typescript.type-flags :as type-flags]
-            [dots.typescript.object-type :as object-type]
             [dots.typescript.type-reference :as type-reference]
+            [dots.typescript.union-or-intersection-type :as union-or-intersection-type]
             [dots.util.names :as names]
             [dots.util.table :as table]))
 
@@ -61,20 +62,20 @@
                   "\";\n")))
 
 (defn- proxy-compiler-host
-  "Creates a CompilerHost that resolves our special proxy file."
+  "Creates a `CompilerHost` that resolves our special proxy file."
   [compiler-opts module-name opts]
   (let [parent-nodes? false
-        script-kind script-kind/ts
-        host        (ts/create-compiler-host compiler-opts parent-nodes?)
-        source-text (proxy-source-text module-name opts)]
-    (letfn [(file-exists [file-name]
+        script-kind   script-kind/ts
+        host          (ts/create-compiler-host compiler-opts parent-nodes?)
+        source-text   (proxy-source-text module-name opts)]
+    (letfn [(file-exists? [file-name]
               (or (proxy-file-name? file-name)
                   (.fileExists host file-name)))
             (get-source-file [file-name target-or-opts on-error create?]
               (if (proxy-file-name? file-name)
                 (ts/create-source-file proxy-file-name source-text target-or-opts parent-nodes? script-kind)
                 (.getSourceFile host file-name target-or-opts on-error create?)))]
-      (.assign js/Object #js {} host #js {:fileExists    file-exists
+      (.assign js/Object #js {} host #js {:fileExists    file-exists?
                                           :getSourceFile get-source-file}))))
 
 (def compiler-opts
@@ -85,19 +86,20 @@
                 :strict  true}))
 
 (defn- create-program
+  "Creates a `Program` from a root source file that just imports `module-name`."
   [module-name opts]
   (let [host (proxy-compiler-host compiler-opts module-name opts)]
     (ts/create-program #js [proxy-file-name] compiler-opts host)))
 
 (defn- import-identifier
-  "Returns the identifier node representing the module import."
+  "Returns the identifier node representing the module import of our
+   proxy source file."
   [program]
   (let [source-file   (program/source-file program proxy-file-name)
         import-clause (import-declaration/import-clause
                        (first (source-file/statements source-file)))]
     (or (import-clause/name import-clause)
-        (namespace-import/name
-         (import-clause/named-bindings import-clause)))))
+        (namespace-import/name (import-clause/named-bindings import-clause)))))
 
 (defn- imported-module-symbol [program]
   (let [checker (program/type-checker program)]
@@ -119,7 +121,7 @@
       (names/split-fqn)))
 
 (defn- extract-type-reference [props env type]
-  (let [target  (type-reference/target type)]
+  (let [target (type-reference/target type)]
     (if (identical? type target)
       props
       (let [checker (:type-checker env)
@@ -231,6 +233,7 @@
 (defn- doc-string [sym]
   (let [parts (symbol/documentation-comment sym)]
     (when (seq parts)
+      ;; TODO: Format the parts to Markdown instead?
       (ts/display-parts-to-string parts))))
 
 (defn- modifier-flags [sym]
@@ -263,11 +266,19 @@
              (type-checker/optional-parameter? checker decl)) (assoc :optional? true)
          (ts/rest-parameter? decl) (assoc :rest? true)))))
 
+(defn- returns-doc-string
+  "Returns the doc string from a signature's `@returns` JS-Doc tag."
+  [sig]
+  (when-first [tag-info (filter #(= "returns" (js-doc-tag-info/name %)) (signature/js-doc-tags sig))]
+    (-> tag-info js-doc-tag-info/text ts/display-parts-to-string)))
+
 (defn- extract-signature [env sig]
   (let [checker     (:type-checker env)
-        return-type (type-checker/return-type-of-signature checker sig)]
+        return-type (type-checker/return-type-of-signature checker sig)
+        return-doc  (returns-doc-string sig)]
     (cond-> {:params      (map #(extract-parameter env %) (signature/parameters sig))
-             :return-type (extract-type env return-type)})))
+             :return-type (extract-type env return-type)}
+      return-doc (assoc :return-doc return-doc))))
 
 (defn- extract-signatures [env type kind]
   (let [checker (:type-checker env)]
@@ -434,13 +445,21 @@
           (swap! cache assoc sym data)
           data)))))
 
-(defn extract [module-name opts]
+(defn extract
+  "Extract information for the TypeScript module `module-name` into a map.
+
+   The returned map contains a `:traits` key, a set of keywords representing
+   what \"kind\" of symbol represents.  For modules, this will contain
+   `:module`.
+
+   Other keys are specific per trait."
+  [module-name opts]
   (let [program (create-program module-name opts)
         symbol  (imported-module-symbol program)
         env     {:type-checker (program/type-checker program)
                  :symbols*     (atom {})
                  :types*       (atom {})}]
-    ;; TODO: The imported symbol is a variable => extract its type
+    ;; TODO: When the imported symbol is a variable, extract its type
     ;; For example, the "path" module exports the `PlatformPath`
     ;; interface
     (-> (extract-symbol env symbol)

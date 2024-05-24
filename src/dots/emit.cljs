@@ -331,6 +331,7 @@
     (emit-namespace out-dir ns)))
 
 (defn emit-project
+  "Emits ClojureScript code for adapted `namespaces`."
   [namespaces {:keys [output-dir]}]
   {:pre [(seq output-dir)]}
   ;; deps.edn file
