@@ -288,6 +288,9 @@
             ;; Type | undefined
             (recur ctx (first (remove :undefined? types)))))))))
 
+(defn- add-getter-return-doc [ctx var-name type]
+  (update-ns ctx update-in [:vars var-name] assoc :return {:type (:str type)}))
+
 (defmethod adapt-trait :variable
   [ctx _ {:keys [name type] :as node}]
   (let [var-name  (names/cljs-name name)
@@ -301,6 +304,7 @@
             (add-var var-name (:doc node) type)
             ;; ? :init-expr for consts, e.g. generate a `def` instead of `defn`?
             (add-arity var-name (assoc expr :op :global-get))
+            (add-getter-return-doc var-name type)
             (cond-> interface (adapt-variable-interface node var-name expr interface))))
       ;; Exported module has variable trait.
       (cond-> ctx
@@ -381,6 +385,7 @@
     (-> ctx
         (add-var var-name (:doc node) type)
         (add-arity var-name get-expr)
+        (add-getter-return-doc var-name type)
         (cond->
          ;; TODO: Handle arity clash: get property vs call with zero args
          (seq signatures) (add-signatures var-name
