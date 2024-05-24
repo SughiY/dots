@@ -1,7 +1,7 @@
 {:paths ["src"]
  :deps {camel-snake-kebab/camel-snake-kebab {:mvn/version "0.4.3"}
-        io.github.dots-cljs/dots-node       {:git/sha "e2c65d2d50e0472f9f818b67c898432c7b6264c1"}
-        io.github.dots-cljs/dots-typescript {:git/sha "7ff40ab358563232b9ead2e20e4be93d8f6c991c"}
+        io.github.dots-cljs/dots-node       {:mvn/version "20.12.12-9"}
+        io.github.dots-cljs/dots-typescript {:mvn/version "5.4.5-6"}
         org.clojure/tools.cli               {:mvn/version "1.0.219"}}
 
  :aliases

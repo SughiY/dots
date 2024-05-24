@@ -415,7 +415,8 @@
         doc-string (->> [doc params-doc return-doc]
                         (remove nil?)
                         (str/join "\n\n"))]
-    (assoc var-data :doc doc-string)))
+    (cond-> var-data
+      (seq doc-string) (assoc :doc doc-string))))
 
 (defn- post-process-vars [vars]
   (update-vals vars build-doc-string))
