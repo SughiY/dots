@@ -56,3 +56,6 @@
   (if-let [[_ n*] (re-matches #"(?:get|is)-(.+)" n)]
     n*
     n))
+
+(defn quoted? [n]
+  (str/starts-with? n "\""))

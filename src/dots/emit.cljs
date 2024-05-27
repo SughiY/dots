@@ -36,54 +36,107 @@
              (str/replace "\n" (str "\n" indent " ")))
          "\"")))
 
-(defn- emit-get [coll path]
-  (case (count path)
-    1 (conj coll (first path))
-    2 (conj coll "(.-" (second path) " " (first path) ")")
-    (-> coll
-        (conj "(.. " (first path))
-        (into (mapcat #(list " -" %)) (next path))
-        (conj ")"))))
+(defn- any-quoted? [path]
+  (some names/quoted? path))
 
-(defn- emit-set [coll path expr ns-data]
+(defn- raw-get
+  "Generates code chunks for a raw property access."
+  [path ns-data]
+  (reduce (fn [obj-coll property]
+            (if (names/quoted? property)
+              (-> ["("]
+                  (emit-core-symbol "unchecked-get" ns-data)
+                  (conj " ")
+                  (into obj-coll)
+                  (conj " " property ")"))
+              (-> ["(.-" property " "]
+                  (into obj-coll)
+                  (conj ")"))))
+          [(first path)]
+          (next path)))
+
+(defn- emit-get-raw [coll path ns-data]
+  (into coll (raw-get path ns-data)))
+
+(defn- emit-get [coll path ns-data]
+  (if (any-quoted? path)
+    (emit-get-raw coll path ns-data)
+    (case (count path)
+      1 (conj coll (first path))
+      2 (conj coll "(.-" (second path) " " (first path) ")")
+      (-> coll
+          (conj "(.. " (first path))
+          (into (mapcat #(list " -" %)) (next path))
+          (conj ")")))))
+
+(defn- emit-set-raw [coll path expr ns-data]
   (-> coll
       (conj "(")
-      (emit-core-symbol "set!" ns-data)
+      (emit-core-symbol "unchecked-set" ns-data)
       (conj " ")
-      (emit-get path)
-      (conj " " expr ")")))
+      (emit-get (butlast path) ns-data)
+      (conj " " (last path) " " expr ")")))
+
+(defn- emit-set [coll path expr ns-data]
+  (if (any-quoted? path)
+    (emit-set-raw coll path expr ns-data)
+    (-> coll
+        (conj "(")
+        (emit-core-symbol "set!" ns-data)
+        (conj " ")
+        (emit-get path ns-data)
+        (conj " " expr ")"))))
 
 (defn- emit-args [coll args]
   (if (seq args)
     (-> coll (conj " ") (into (interpose " " args)))
     coll))
 
-(defn- emit-call* [coll path emit-args]
-  (case (count path)
-    1 (-> coll
-          (conj "(" (first path))
-          (emit-args)
+(defn- emit-call-raw [coll path emit-args-fn ns-data]
+  (let [fname (last path)]
+    (if (names/quoted? fname)
+      (-> coll
+          (conj "(")
+          (emit-core-symbol "js-invoke" ns-data)
+          (conj " ")
+          (emit-get (butlast path) ns-data)
+          (conj " " fname)
+          (emit-args-fn)
           (conj ")"))
-    2 (-> coll
-          (conj "(." (second path) " " (first path))
-          (emit-args)
-          (conj ")"))
-    (-> coll
-        (conj "(.. " (first path))
-        (into (mapcat #(list " -" %)) (butlast (next path)))
-        (conj " (" (last path))
-        (emit-args)
-        (conj "))"))))
+      (-> coll
+          (conj "(." fname " ")
+          (emit-get (butlast path) ns-data)
+          (emit-args-fn)
+          (conj ")")))))
 
-(defn- emit-call [coll path args]
-  (emit-call* coll path #(emit-args % args)))
+(defn- emit-call* [coll path emit-args-fn ns-data]
+  (if (any-quoted? path)
+    (emit-call-raw coll path emit-args-fn ns-data)
+    (case (count path)
+      1 (-> coll
+            (conj "(" (first path))
+            (emit-args-fn)
+            (conj ")"))
+      2 (-> coll
+            (conj "(." (second path) " " (first path))
+            (emit-args-fn)
+            (conj ")"))
+      (-> coll
+          (conj "(.. " (first path))
+          (into (mapcat #(list " -" %)) (butlast (next path)))
+          (conj " (" (last path))
+          (emit-args-fn)
+          (conj "))")))))
+
+(defn- emit-call [coll path args ns-data]
+  (emit-call* coll path #(emit-args % args) ns-data))
 
 (defn- emit-apply-args [coll path args rest-arg ns-data]
   (-> coll
       (conj " ")
       (as-> % (let [this-path (butlast path)]
                 (if (seq this-path)
-                  (emit-get % this-path)
+                  (emit-get % this-path ns-data)
                   (conj % "nil"))))
       (conj " (")
       (emit-core-symbol "to-array" ns-data)
@@ -99,18 +152,19 @@
 
 (defn- emit-apply [coll path args rest-arg ns-data]
   (emit-call* coll (concat path (list "apply"))
-              #(emit-apply-args % path args rest-arg ns-data)))
+              #(emit-apply-args % path args rest-arg ns-data)
+              ns-data))
 
 (defn- emit-call-or-apply [coll path args rest-arg ns-data]
   (if rest-arg
     (emit-apply coll path args rest-arg ns-data)
-    (emit-call coll path args)))
+    (emit-call coll path args ns-data)))
 
 ;; TODO: Support var-args variant, maybe using (.construct js/Reflect ctor args)
-(defn- emit-construct [coll path args]
+(defn- emit-construct [coll path args ns-data]
   (-> coll
       (conj "(new ")
-      (emit-get path)
+      (emit-get path ns-data)
       (emit-args args)
       (conj ")")))
 
@@ -132,7 +186,7 @@
 
 (defmethod emit-expr :global-get
   [coll expr _ _ ns-data]
-  (emit-get coll (module-path expr ns-data)))
+  (emit-get coll (module-path expr ns-data) ns-data))
 
 (defmethod emit-expr :global-set
   [coll expr args _ ns-data]
@@ -144,11 +198,11 @@
 
 (defmethod emit-expr :global-construct
   [coll expr args _ ns-data]
-  (emit-construct coll (module-path expr ns-data) args))
+  (emit-construct coll (module-path expr ns-data) args ns-data))
 
 (defmethod emit-expr :arg-get
-  [coll {:keys [path]} args _ _]
-  (emit-get coll (cons (this-arg args) path)))
+  [coll {:keys [path]} args _ ns-data]
+  (emit-get coll (cons (this-arg args) path) ns-data))
 
 (defmethod emit-expr :arg-set
   [coll {:keys [path]} args _ ns-data]
@@ -280,7 +334,7 @@
                           (into (mapcat (fn [[module alias]]
                                           (list " [\"" module "\" :as " alias "]")))
                                 (sort-by first requires))
-                          (into ")")))
+                          (conj ")")))
       (conj ")\n")))
 
 (defn- namespace-munge [ns]
