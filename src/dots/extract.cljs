@@ -237,7 +237,9 @@
       (ts/display-parts-to-string parts))))
 
 (defn- modifier-flags [sym]
-  (ts/combined-modifier-flags (symbol/value-declaration sym)))
+  (let [value-declaration (symbol/value-declaration sym)]
+    (when (some? value-declaration)
+      (ts/combined-modifier-flags value-declaration))))
 
 (declare extract-symbol)
 
